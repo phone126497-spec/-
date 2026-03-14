@@ -35,27 +35,27 @@ export default function App() {
   const [description, setDescription] = useState('');
   const [dueDate, setDueDate] = useState('');
 
-  // Fetch todos from API with localStorage fallback
+  // Fetch todos from local API
   const fetchTodos = async (silent = false) => {
     if (!silent) setLoading(true);
     try {
       const response = await fetch('/api/todos');
-      if (!response.ok) throw new Error('API_ERROR');
+      if (!response.ok) throw new Error('Failed to fetch');
       const data = await response.json();
-      setTodos(data);
-      localStorage.setItem('taskflow_cloud_connected', 'true');
+      setTodos(data || []);
+      localStorage.setItem('taskflow_server_connected', 'true');
     } catch (error: any) {
       console.error('Error fetching todos:', error.message);
-      localStorage.setItem('taskflow_cloud_connected', 'false');
+      localStorage.setItem('taskflow_server_connected', 'false');
       const saved = localStorage.getItem('taskflow_todos');
       setTodos(saved ? JSON.parse(saved) : []);
-      if (!silent) toast.error('클라우드 연결에 실패하여 로컬 모드로 전환합니다.');
+      if (!silent) toast.error('서버 연결 실패. 로컬 모드로 작동합니다.');
     } finally {
       if (!silent) setLoading(false);
     }
   };
 
-  const isCloudActive = () => localStorage.getItem('taskflow_cloud_connected') === 'true';
+  const isServerActive = () => localStorage.getItem('taskflow_server_connected') === 'true';
 
   useEffect(() => {
     fetchTodos();
@@ -63,7 +63,7 @@ export default function App() {
 
   // Save to localStorage as backup
   useEffect(() => {
-    if (!isCloudActive()) {
+    if (!isServerActive()) {
       localStorage.setItem('taskflow_todos', JSON.stringify(todos));
     }
   }, [todos]);
@@ -107,17 +107,17 @@ export default function App() {
     e.preventDefault();
     if (!title.trim()) return;
 
-    const cloudActive = isCloudActive();
+    const serverActive = isServerActive();
 
     try {
       if (editingTodo) {
-        if (cloudActive) {
+        if (serverActive) {
           const response = await fetch(`/api/todos/${editingTodo.id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title, description, due_date: dueDate || null })
+            body: JSON.stringify({ title, description, due_date: dueDate || null }),
           });
-          if (!response.ok) throw new Error('API_ERROR');
+          if (!response.ok) throw new Error('Update failed');
         } else {
           setTodos(todos.map(t => t.id === editingTodo.id ? {
             ...t,
@@ -128,13 +128,13 @@ export default function App() {
         }
         toast.success('할일이 수정되었습니다.');
       } else {
-        if (cloudActive) {
+        if (serverActive) {
           const response = await fetch('/api/todos', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title, description, due_date: dueDate || null, completed: false })
+            body: JSON.stringify({ title, description, due_date: dueDate || null, completed: false }),
           });
-          if (!response.ok) throw new Error('API_ERROR');
+          if (!response.ok) throw new Error('Create failed');
         } else {
           const newTodo: Todo = {
             id: crypto.randomUUID(),
@@ -148,7 +148,7 @@ export default function App() {
         }
         toast.success('새로운 할일이 등록되었습니다.');
       }
-      if (cloudActive) fetchTodos(true);
+      if (serverActive) fetchTodos(true);
       closeModal();
     } catch (error: any) {
       console.error('Error saving todo:', error.message);
@@ -157,15 +157,15 @@ export default function App() {
   };
 
   const toggleTodo = async (id: string, currentStatus: boolean) => {
-    const cloudActive = isCloudActive();
+    const serverActive = isServerActive();
     try {
-      if (cloudActive) {
+      if (serverActive) {
         const response = await fetch(`/api/todos/${id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ completed: !currentStatus })
+          body: JSON.stringify({ completed: !currentStatus }),
         });
-        if (!response.ok) throw new Error('API_ERROR');
+        if (!response.ok) throw new Error('Toggle failed');
       }
       
       setTodos(todos.map(t => t.id === id ? { ...t, completed: !currentStatus } : t));
@@ -179,11 +179,13 @@ export default function App() {
   };
 
   const deleteTodo = async (id: string) => {
-    const cloudActive = isCloudActive();
+    const serverActive = isServerActive();
     try {
-      if (cloudActive) {
-        const response = await fetch(`/api/todos/${id}`, { method: 'DELETE' });
-        if (!response.ok) throw new Error('API_ERROR');
+      if (serverActive) {
+        const response = await fetch(`/api/todos/${id}`, {
+          method: 'DELETE',
+        });
+        if (!response.ok) throw new Error('Delete failed');
       }
       
       setTodos(todos.filter(t => t.id !== id));
@@ -238,15 +240,15 @@ export default function App() {
             TaskFlow
           </motion.h1>
           <p className="text-zinc-500 font-medium">
-            {isCloudActive() ? '클라우드와 함께하는 스마트한 할일 관리.' : '로컬 저장소 모드'}
+            {isServerActive() ? '서버 저장소와 함께하는 스마트한 할일 관리.' : '로컬 저장소 모드 (서버 연결 확인 필요)'}
           </p>
         </div>
         
         <div className="flex flex-col items-end gap-2">
-          {!isCloudActive() && (
+          {!isServerActive() && (
             <div className="flex items-center gap-2 text-[10px] font-bold text-amber-600 bg-amber-50 px-3 py-1 rounded-full border border-amber-100">
               <AlertCircle size={12} />
-              서버 연결 확인 필요
+              서버 연결에 문제가 있습니다
             </div>
           )}
           <button 
@@ -523,6 +525,21 @@ export default function App() {
 
       {/* Floating Notification Info */}
       <div className="fixed bottom-8 right-8 flex flex-col items-end gap-4">
+        {!isServerActive() && (
+          <motion.div 
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="bg-amber-900 text-white p-4 rounded-2xl shadow-2xl max-w-xs text-xs border border-amber-800"
+          >
+            <div className="flex items-center gap-2 mb-2 font-bold text-amber-400">
+              <AlertCircle size={14} />
+              클라우드 저장 비활성
+            </div>
+            <p className="leading-relaxed opacity-90">
+              서버와의 연결이 원활하지 않습니다. 현재 데이터는 브라우저의 로컬 저장소에만 저장됩니다.
+            </p>
+          </motion.div>
+        )}
         <div className="group relative">
           <div className="bg-white p-3 rounded-full shadow-xl border border-zinc-100 text-zinc-400 hover:text-zinc-900 transition-all cursor-help">
             <Bell size={24} />
