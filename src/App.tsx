@@ -11,20 +11,19 @@ import {
   X, 
   Filter,
   AlertCircle,
-  Clock
+  Clock,
+  Loader2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format, isPast, isToday, parseISO } from 'date-fns';
 import { ko } from 'date-fns/locale';
 import toast, { Toaster } from 'react-hot-toast';
 import { Todo, FilterType } from './types';
+import { supabase } from './supabase';
 
 export default function App() {
-  const [todos, setTodos] = useState<Todo[]>(() => {
-    const saved = localStorage.getItem('taskflow_todos');
-    return saved ? JSON.parse(saved) : [];
-  });
-  
+  const [todos, setTodos] = useState<Todo[]>([]);
+  const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [filter, setFilter] = useState<FilterType>('all');
   const [hideCompleted, setHideCompleted] = useState(false);
@@ -36,9 +35,37 @@ export default function App() {
   const [description, setDescription] = useState('');
   const [dueDate, setDueDate] = useState('');
 
-  // Save to localStorage
+  // Fetch todos from API with localStorage fallback
+  const fetchTodos = async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const response = await fetch('/api/todos');
+      if (!response.ok) throw new Error('API_ERROR');
+      const data = await response.json();
+      setTodos(data);
+      localStorage.setItem('taskflow_cloud_connected', 'true');
+    } catch (error: any) {
+      console.error('Error fetching todos:', error.message);
+      localStorage.setItem('taskflow_cloud_connected', 'false');
+      const saved = localStorage.getItem('taskflow_todos');
+      setTodos(saved ? JSON.parse(saved) : []);
+      if (!silent) toast.error('클라우드 연결에 실패하여 로컬 모드로 전환합니다.');
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  };
+
+  const isCloudActive = () => localStorage.getItem('taskflow_cloud_connected') === 'true';
+
   useEffect(() => {
-    localStorage.setItem('taskflow_todos', JSON.stringify(todos));
+    fetchTodos();
+  }, []);
+
+  // Save to localStorage as backup
+  useEffect(() => {
+    if (!isCloudActive()) {
+      localStorage.setItem('taskflow_todos', JSON.stringify(todos));
+    }
   }, [todos]);
 
   // Notification check
@@ -46,9 +73,8 @@ export default function App() {
     const checkNotifications = () => {
       const now = new Date();
       todos.forEach(todo => {
-        if (!todo.completed && todo.dueDate) {
-          const due = parseISO(todo.dueDate);
-          // Simple check: if it's due today and we haven't notified (simplified for demo)
+        if (!todo.completed && todo.due_date) {
+          const due = parseISO(todo.due_date);
           if (isToday(due) && now.getHours() === 9 && now.getMinutes() === 0) {
             toast(`오늘 마감인 할일이 있습니다: ${todo.title}`, {
               icon: '🔔',
@@ -59,7 +85,7 @@ export default function App() {
       });
     };
 
-    const interval = setInterval(checkNotifications, 60000); // Check every minute
+    const interval = setInterval(checkNotifications, 60000);
     return () => clearInterval(interval);
   }, [todos]);
 
@@ -67,65 +93,113 @@ export default function App() {
     return todos
       .filter(todo => {
         const matchesSearch = todo.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                            todo.description.toLowerCase().includes(searchQuery.toLowerCase());
+                            (todo.description?.toLowerCase().includes(searchQuery.toLowerCase()) ?? false);
         
-        // Apply hideCompleted toggle first, then the tab filter
         if (hideCompleted && todo.completed) return false;
         
         const matchesFilter = filter === 'all' ? true : 
                             filter === 'completed' ? todo.completed : !todo.completed;
         return matchesSearch && matchesFilter;
-      })
-      .sort((a, b) => b.createdAt - a.createdAt);
+      });
   }, [todos, searchQuery, filter, hideCompleted]);
 
-  const handleAddOrUpdateTodo = (e: React.FormEvent) => {
+  const handleAddOrUpdateTodo = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
 
-    if (editingTodo) {
-      setTodos(todos.map(t => t.id === editingTodo.id ? {
-        ...t,
-        title,
-        description,
-        dueDate,
-      } : t));
-      toast.success('할일이 수정되었습니다.');
-    } else {
-      const newTodo: Todo = {
-        id: crypto.randomUUID(),
-        title,
-        description,
-        dueDate,
-        completed: false,
-        createdAt: Date.now(),
-      };
-      setTodos([newTodo, ...todos]);
-      toast.success('새로운 할일이 등록되었습니다.');
-    }
+    const cloudActive = isCloudActive();
 
-    closeModal();
+    try {
+      if (editingTodo) {
+        if (cloudActive) {
+          const response = await fetch(`/api/todos/${editingTodo.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title, description, due_date: dueDate || null })
+          });
+          if (!response.ok) throw new Error('API_ERROR');
+        } else {
+          setTodos(todos.map(t => t.id === editingTodo.id ? {
+            ...t,
+            title,
+            description,
+            due_date: dueDate || null,
+          } : t));
+        }
+        toast.success('할일이 수정되었습니다.');
+      } else {
+        if (cloudActive) {
+          const response = await fetch('/api/todos', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title, description, due_date: dueDate || null, completed: false })
+          });
+          if (!response.ok) throw new Error('API_ERROR');
+        } else {
+          const newTodo: Todo = {
+            id: crypto.randomUUID(),
+            title,
+            description,
+            due_date: dueDate || null,
+            completed: false,
+            created_at: new Date().toISOString(),
+          };
+          setTodos([newTodo, ...todos]);
+        }
+        toast.success('새로운 할일이 등록되었습니다.');
+      }
+      if (cloudActive) fetchTodos(true);
+      closeModal();
+    } catch (error: any) {
+      console.error('Error saving todo:', error.message);
+      toast.error('저장 중 오류가 발생했습니다.');
+    }
   };
 
-  const toggleTodo = (id: string) => {
-    setTodos(todos.map(t => t.id === id ? { ...t, completed: !t.completed } : t));
-    const todo = todos.find(t => t.id === id);
-    if (todo && !todo.completed) {
-      toast.success('할일을 완료했습니다! 🎉');
+  const toggleTodo = async (id: string, currentStatus: boolean) => {
+    const cloudActive = isCloudActive();
+    try {
+      if (cloudActive) {
+        const response = await fetch(`/api/todos/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ completed: !currentStatus })
+        });
+        if (!response.ok) throw new Error('API_ERROR');
+      }
+      
+      setTodos(todos.map(t => t.id === id ? { ...t, completed: !currentStatus } : t));
+      if (!currentStatus) {
+        toast.success('할일을 완료했습니다! 🎉');
+      }
+    } catch (error: any) {
+      console.error('Error toggling todo:', error.message);
+      toast.error('상태 변경 중 오류가 발생했습니다.');
     }
   };
 
-  const deleteTodo = (id: string) => {
-    setTodos(todos.filter(t => t.id !== id));
-    toast.error('할일이 삭제되었습니다.');
+  const deleteTodo = async (id: string) => {
+    const cloudActive = isCloudActive();
+    try {
+      if (cloudActive) {
+        const response = await fetch(`/api/todos/${id}`, { method: 'DELETE' });
+        if (!response.ok) throw new Error('API_ERROR');
+      }
+      
+      setTodos(todos.filter(t => t.id !== id));
+      toast.error('할일이 삭제되었습니다.');
+    } catch (error: any) {
+      console.error('Error deleting todo:', error.message);
+      toast.error('삭제 중 오류가 발생했습니다.');
+    }
   };
 
   const openModal = (todo?: Todo) => {
     if (todo) {
       setEditingTodo(todo);
       setTitle(todo.title);
-      setDescription(todo.description);
-      setDueDate(todo.dueDate);
+      setDescription(todo.description || '');
+      setDueDate(todo.due_date || '');
     } else {
       setEditingTodo(null);
       setTitle('');
@@ -163,10 +237,18 @@ export default function App() {
           >
             TaskFlow
           </motion.h1>
-          <p className="text-zinc-500 font-medium">오늘의 할일을 스마트하게 관리하세요.</p>
+          <p className="text-zinc-500 font-medium">
+            {isCloudActive() ? '클라우드와 함께하는 스마트한 할일 관리.' : '로컬 저장소 모드'}
+          </p>
         </div>
         
-        <div className="flex gap-2">
+        <div className="flex flex-col items-end gap-2">
+          {!isCloudActive() && (
+            <div className="flex items-center gap-2 text-[10px] font-bold text-amber-600 bg-amber-50 px-3 py-1 rounded-full border border-amber-100">
+              <AlertCircle size={12} />
+              서버 연결 확인 필요
+            </div>
+          )}
           <button 
             onClick={() => openModal()}
             className="bg-zinc-900 text-white px-6 py-3 rounded-2xl font-semibold flex items-center gap-2 hover:bg-zinc-800 transition-all shadow-lg hover:shadow-zinc-200 active:scale-95"
@@ -259,89 +341,96 @@ export default function App() {
 
       {/* Todo List */}
       <div className="space-y-4">
-        <AnimatePresence mode="popLayout">
-          {filteredTodos.length > 0 ? (
-            filteredTodos.map((todo) => (
-              <motion.div
-                key={todo.id}
-                layout
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.95 }}
-                className={`glass-card p-5 rounded-2xl flex items-start gap-4 group transition-all ${
-                  todo.completed ? 'opacity-60' : ''
-                }`}
-              >
-                <button 
-                  onClick={() => toggleTodo(todo.id)}
-                  className={`mt-1 transition-colors ${
-                    todo.completed ? 'text-emerald-500' : 'text-zinc-300 hover:text-zinc-400'
+        {loading ? (
+          <div className="py-20 flex flex-col items-center justify-center text-zinc-400">
+            <Loader2 className="animate-spin mb-4" size={40} />
+            <p className="font-medium">데이터를 불러오는 중...</p>
+          </div>
+        ) : (
+          <AnimatePresence mode="popLayout">
+            {filteredTodos.length > 0 ? (
+              filteredTodos.map((todo) => (
+                <motion.div
+                  key={todo.id}
+                  layout
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.95 }}
+                  className={`glass-card p-5 rounded-2xl flex items-start gap-4 group transition-all ${
+                    todo.completed ? 'opacity-60' : ''
                   }`}
                 >
-                  {todo.completed ? <CheckCircle2 size={24} /> : <Circle size={24} />}
-                </button>
-                
-                <div className="flex-1 min-w-0">
-                  <h3 className={`text-lg font-bold leading-tight mb-1 ${
-                    todo.completed ? 'line-through text-zinc-400' : 'text-zinc-900'
-                  }`}>
-                    {todo.title}
-                  </h3>
-                  {todo.description && (
-                    <p className="text-zinc-500 text-sm mb-3 line-clamp-2">{todo.description}</p>
-                  )}
+                  <button 
+                    onClick={() => toggleTodo(todo.id, todo.completed)}
+                    className={`mt-1 transition-colors ${
+                      todo.completed ? 'text-emerald-500' : 'text-zinc-300 hover:text-zinc-400'
+                    }`}
+                  >
+                    {todo.completed ? <CheckCircle2 size={24} /> : <Circle size={24} />}
+                  </button>
                   
-                  <div className="flex flex-wrap gap-3 items-center">
-                    {todo.dueDate && (
-                      <div className={`flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-lg ${
-                        !todo.completed && isPast(parseISO(todo.dueDate)) && !isToday(parseISO(todo.dueDate))
-                          ? 'bg-red-50 text-red-600'
-                          : 'bg-zinc-100 text-zinc-600'
-                      }`}>
-                        <Calendar size={14} />
-                        {format(parseISO(todo.dueDate), 'yyyy년 MM월 dd일', { locale: ko })}
-                        {!todo.completed && isPast(parseISO(todo.dueDate)) && !isToday(parseISO(todo.dueDate)) && (
-                          <span className="ml-1">(연체)</span>
-                        )}
-                      </div>
+                  <div className="flex-1 min-w-0">
+                    <h3 className={`text-lg font-bold leading-tight mb-1 ${
+                      todo.completed ? 'line-through text-zinc-400' : 'text-zinc-900'
+                    }`}>
+                      {todo.title}
+                    </h3>
+                    {todo.description && (
+                      <p className="text-zinc-500 text-sm mb-3 line-clamp-2">{todo.description}</p>
                     )}
-                    <div className="flex items-center gap-1.5 text-xs font-bold text-zinc-400 bg-zinc-50 px-2.5 py-1 rounded-lg">
-                      <Clock size={14} />
-                      {format(todo.createdAt, 'HH:mm')}
+                    
+                    <div className="flex flex-wrap gap-3 items-center">
+                      {todo.due_date && (
+                        <div className={`flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-lg ${
+                          !todo.completed && isPast(parseISO(todo.due_date)) && !isToday(parseISO(todo.due_date))
+                            ? 'bg-red-50 text-red-600'
+                            : 'bg-zinc-100 text-zinc-600'
+                        }`}>
+                          <Calendar size={14} />
+                          {format(parseISO(todo.due_date), 'yyyy년 MM월 dd일', { locale: ko })}
+                          {!todo.completed && isPast(parseISO(todo.due_date)) && !isToday(parseISO(todo.due_date)) && (
+                            <span className="ml-1">(연체)</span>
+                          )}
+                        </div>
+                      )}
+                      <div className="flex items-center gap-1.5 text-xs font-bold text-zinc-400 bg-zinc-50 px-2.5 py-1 rounded-lg">
+                        <Clock size={14} />
+                        {format(parseISO(todo.created_at), 'HH:mm')}
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button 
-                    onClick={() => openModal(todo)}
-                    className="p-2 text-zinc-400 hover:text-zinc-900 hover:bg-zinc-100 rounded-xl transition-all"
-                  >
-                    <Edit3 size={18} />
-                  </button>
-                  <button 
-                    onClick={() => deleteTodo(todo.id)}
-                    className="p-2 text-zinc-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
-                  >
-                    <Trash2 size={18} />
-                  </button>
+                  <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button 
+                      onClick={() => openModal(todo)}
+                      className="p-2 text-zinc-400 hover:text-zinc-900 hover:bg-zinc-100 rounded-xl transition-all"
+                    >
+                      <Edit3 size={18} />
+                    </button>
+                    <button 
+                      onClick={() => deleteTodo(todo.id)}
+                      className="p-2 text-zinc-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
+                </motion.div>
+              ))
+            ) : (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="py-20 text-center"
+              >
+                <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-zinc-100 text-zinc-300 mb-4">
+                  <AlertCircle size={40} />
                 </div>
+                <h3 className="text-xl font-bold text-zinc-900 mb-1">할일이 없습니다</h3>
+                <p className="text-zinc-500">새로운 할일을 추가하여 하루를 시작해보세요.</p>
               </motion.div>
-            ))
-          ) : (
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="py-20 text-center"
-            >
-              <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-zinc-100 text-zinc-300 mb-4">
-                <AlertCircle size={40} />
-              </div>
-              <h3 className="text-xl font-bold text-zinc-900 mb-1">할일이 없습니다</h3>
-              <p className="text-zinc-500">새로운 할일을 추가하여 하루를 시작해보세요.</p>
-            </motion.div>
-          )}
-        </AnimatePresence>
+            )}
+          </AnimatePresence>
+        )}
       </div>
 
       {/* Modal */}
@@ -433,7 +522,7 @@ export default function App() {
       </AnimatePresence>
 
       {/* Floating Notification Info */}
-      <div className="fixed bottom-8 right-8">
+      <div className="fixed bottom-8 right-8 flex flex-col items-end gap-4">
         <div className="group relative">
           <div className="bg-white p-3 rounded-full shadow-xl border border-zinc-100 text-zinc-400 hover:text-zinc-900 transition-all cursor-help">
             <Bell size={24} />

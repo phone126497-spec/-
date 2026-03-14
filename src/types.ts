@@ -2,9 +2,9 @@ export interface Todo {
   id: string;
   title: string;
   description: string;
-  dueDate: string;
+  due_date: string;
   completed: boolean;
-  createdAt: number;
+  created_at: string;
 }
 
 export type FilterType = 'all' | 'active' | 'completed';
